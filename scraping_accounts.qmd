@@ -1,0 +1,212 @@
+---
+title: Webscraping
+author: Jan Bohnenstengel
+theme: cosmo
+format:
+    html: default
+---
+
+```{r} Setup
+rm(list = ls())
+
+librarian::shelf(tidyverse,
+                 rvest,
+                 purrr,
+                 stringr,
+                 RSelenium,
+                 httr,
+                 jsonlite,
+                 lubridate,
+                 readr)
+```
+
+```{r} Selenium to get source
+# Needed because source code is strange (page loads only skeleton, JS fetches data and builds what I
+# see in inspector)
+# Therefore, let Selenium run JS
+ffPath <- "C:/Program Files/Mozilla Firefox/firefox.exe"
+url_index <- "https://www.ecb.europa.eu/press/pubbydate/html/index.en.html?name_of_publication=Monetary%20policy%20account"
+
+remDr <- remoteDriver(
+  remoteServerAddr = "localhost",
+  port = 4444L,
+  browserName = "firefox",
+  extraCapabilities = list(
+    "moz:firefoxOptions" = list(
+      binary = ffPath
+    )
+  )
+)
+remDr$open()
+remDr$navigate(url_index)
+Sys.sleep(5)
+
+html <- remDr$getPageSource()[[1]]
+remDr$close()
+```
+
+```{r} Get account URLs
+# Use XHR requests to find all meetings in chunk_*.json files
+# The page is not static so rvest doesn't work
+# With this following code I can pull titles and URLS from these .json-files
+
+# base to construct absolute URLs
+ecb_base <- "https://www.ecb.europa.eu"
+
+# include referer
+headers <- add_headers(
+  Referer = "https://www.ecb.europa.eu/press/pubbydate/html/index.en.html?name_of_publication=Monetary%20policy%20account",
+  `User-Agent` = "Mozilla/5.0"
+)
+
+# function to fetch chunk files and extract meetings
+parse_chunk_accounts_full <- function(chunk_num) {
+  url <- glue::glue("https://www.ecb.europa.eu/foedb/dbs/foedb/publications.en/1766498435/ZWW6slQ9/data/0/chunk_{chunk_num}.json")
+  
+  res <- try(GET(url, headers), silent = TRUE)
+  if (inherits(res, "try-error") || status_code(res) != 200) return(NULL)
+  
+  txt <- httr::content(res, as = "text", encoding = "UTF-8")
+  items <- fromJSON(txt, simplifyVector = FALSE)
+  
+  out <- list()
+  last_url <- NULL
+  
+  for (i in seq_along(items)) {
+    item <- items[[i]]
+    
+    # If item is a URL starting with /press/accounts/ (filter all publications for policy accounts)
+    if (is.list(item) && length(item) > 0 && is.character(item[[1]]) &&
+        str_starts(item[[1]], "/press/accounts/")) {
+      last_url <- paste0(ecb_base, item[[1]])
+    }
+    
+    # Attach Title to URL
+    if (!is.null(last_url) && is.list(item) && "Title" %in% names(item)) {
+      out[[length(out) + 1]] <- tibble(
+        title = item$Title,
+        url = last_url
+      )
+      last_url <- NULL
+    }
+  }
+  
+  bind_rows(out)
+}
+
+# Loop through all chunks
+all_meetings <- map_dfr(0:60, parse_chunk_accounts_full)
+
+# Remove duplicates
+all_meetings <- distinct(all_meetings)
+```
+
+```{r} Add date column to meetings
+# Extract date from the 6 digits following 'mg' in the URL and convert from YYMMDD to Date format
+all_meetings_date <- all_meetings |>
+  mutate(
+    date_code = str_extract(url, "(?<=([/.])mg)\\d{6}"),
+    
+    date = as.Date(date_code, format = "%y%m%d")
+  ) |>
+  select(title, url, date) |>
+  arrange(desc(date))
+```
+
+
+```{r} Scrape Texts
+scrape_account_text <- function(url) {
+  tryCatch({
+    page <- read_html(url)
+    
+    # Grab all div.section nodes
+    sections <- page |> html_nodes("div.section")
+    
+    text <- NA_character_
+    
+    # Try section 3 if it exists (relevant text usually in section 3)
+    if (length(sections) >= 3) {
+      text <- sections[[3]] |> html_text(trim = TRUE) |> str_squish()
+    }
+    
+    # If section 3 is too short (<1000 chars), try section 4
+    if (is.na(text) || nchar(text) < 1000) {
+      if (length(sections) >= 4) {
+        text <- sections[[4]] |> html_text(trim = TRUE) |> str_squish()
+      }
+    }
+    
+    tibble(
+      url_text = url,
+      text = text
+    )
+    
+  }, error = function(e) {
+    message("Error at: ", url)
+    tibble(url_text = url, text = NA_character_)
+  })
+}
+
+
+all_meetings_text <- all_meetings_date |>
+  select(url, title, date) |>
+  mutate(
+    scraped = map(url, function(u) {
+      scrape_account_text(u) |> rename(scraped_text = text)
+    })
+  ) |>
+  unnest(scraped) |>
+  select(-url_text)
+```
+
+Faulty Meetings (no/too little text):
+* 2023-01-19 (No text) -> need section 4
+* 2017-04-06 (only infoon place and time) -> need section 4 as well for all these
+* until 2016-02-18
+
+```{r} Inspect faulty lines (FIXED)
+nchar(all_meetings_text$scraped_text)
+
+# url <- "https://www.ecb.europa.eu/press/accounts/2016/html/mg160114.en.html"
+# page <- read_html(url)
+
+# # List all div.section nodes
+# sections <- page |> html_nodes("div.section")
+# length(sections) # see how many there are
+
+# # Extract text from each section
+# texts <- sections |> html_text(trim = TRUE)
+
+## Check sections
+# texts[[1]]
+# texts[[3]]
+# texts[[4]]
+```
+
+```{r} Clean text
+library(stringr)
+
+clean_ecb_text <- function(text) {
+  
+  text |>
+    # Normalize line breaks & whitespace
+    str_replace_all("[\r\n\t]+", " ") |>
+    str_replace_all("\\s{2,}", " ") |>
+    
+    # Remove separators and unify dashes
+    str_replace_all("\\*\\*\\*", " ") |>
+    str_replace_all("–|—", "-") |>
+    
+    # Remove non-breaking spaces
+    str_replace_all("\u00A0", " ") |>
+    
+    str_trim()
+}
+
+all_meetings_text <- all_meetings_text |>
+  mutate(scraped_text = clean_ecb_text(scraped_text))
+```
+
+```{r} Save data frame
+saveRDS(all_meetings_text, "data/ECB_policy_accounts.rds")
+```
