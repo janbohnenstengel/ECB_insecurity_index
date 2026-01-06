@@ -1,0 +1,294 @@
+---
+title: Webscraping
+author: "Jan Bohnenstengel"
+theme: cosmo
+format:
+    html: default
+---
+
+```{r}
+rm(list = ls())
+
+librarian::shelf(tidyverse,
+                 rvest,
+                 purrr,
+                 stringr,
+                 RSelenium,
+                 httr,
+                 jsonlite,
+                 lubridate,
+                 readr)
+```
+
+```{r} Selenium
+# Needed because source code is strange (page loads only skeleton, JS fetches data and builds what I
+# see in inspector)
+# Therefore, let Selenium run JS, get XHR requests from there
+ffPath <- "C:/Program Files/Mozilla Firefox/firefox.exe"
+url_index <- "https://www.ecb.europa.eu/press/pubbydate/html/index.en.html?name_of_publication=Monetary%20policy%20statement"
+
+remDr <- remoteDriver(
+  remoteServerAddr = "localhost",
+  port = 4444L,
+  browserName = "firefox",
+  extraCapabilities = list(
+    "moz:firefoxOptions" = list(
+      binary = ffPath
+    )
+  )
+)
+remDr$open()
+remDr$navigate(url_index)
+Sys.sleep(5)
+
+html <- remDr$getPageSource()[[1]]
+
+remDr$close()
+```
+
+```{r} Get statement URLs
+# Use XHR requests to find all meetings in chunk_*.json files
+# The page is not static so rvest doesn't work
+# With this following code we can pull titles and URLS from these .json-files
+
+# base to construct absolute URLs
+ecb_base <- "https://www.ecb.europa.eu"
+
+# Include referer (from Inspector)
+headers <- add_headers(
+  Referer = "https://www.ecb.europa.eu/press/pubbydate/html/index.en.html?name_of_publication=Monetary%20policy%20statement",
+  `User-Agent` = "Mozilla/5.0"
+)
+
+parse_chunk_statements <- function(chunk_num) {
+  url <- glue::glue("https://www.ecb.europa.eu/foedb/dbs/foedb/publications.en/1766498435/ZWW6slQ9/data/0/chunk_{chunk_num}.json")
+  
+  res <- try(GET(url, headers), silent = TRUE)
+  if (inherits(res, "try-error") || status_code(res) != 200) return(NULL)
+  
+  txt <- httr::content(res, as = "text", encoding = "UTF-8")
+  items <- fromJSON(txt, simplifyVector = FALSE)
+  
+  out <- list()
+  last_url <- NULL
+  
+  for (i in seq_along(items)) {
+    item <- items[[i]]
+    
+    # Filter all publications for policy statements with Q&As
+    if (is.list(item) && length(item) > 0 && is.character(item[[1]]) &&
+        str_starts(item[[1]], "/press/press_conference/monetary-policy-statement/")) {
+      last_url <- paste0(ecb_base, item[[1]])
+    }
+    
+    # Attach Title to URL
+    if (!is.null(last_url) && is.list(item) && "Title" %in% names(item)) {
+      out[[length(out) + 1]] <- tibble(
+        title = item$Title,
+        url = last_url
+      )
+      last_url <- NULL
+    }
+  }
+  
+  bind_rows(out)
+}
+
+# Loop through all chunks
+all_statements <- map_dfr(0:80, parse_chunk_statements)
+
+# Remove duplicates
+all_statements <- distinct(all_statements)
+
+all_statements <- all_statements |>
+  filter(!grepl("ecb\\.ds", url))
+```
+
+```{r} Add date column to statements
+
+# Extract date from the 6 digits following 'mg' in the URL and convert from YYMMDD to Date format
+all_statements_date <- all_statements |>
+  mutate(
+    date_code = str_extract(url, "(?<=([/.])is)\\d{6}"),
+    
+    date = as.Date(date_code, format = "%y%m%d")
+  ) |>
+  select(title, url, date) |>
+  arrange(desc(date))
+
+all_statements_date <- all_statements_date |>
+  mutate(date = case_when(
+    url == "https://www.ecb.europa.eu/press/press_conference/monetary-policy-statement/2021/html/ecb.sp210708~ab68c3bd9d.en.html" ~ as.Date("2021-07-08"),
+    .default = date
+  )) |>
+  arrange(desc(date))
+```
+
+```{r} Check source code of statements
+# url <- "https://www.ecb.europa.eu/press/press_conference/monetary-policy-statement/2010/html/is100408.en.html"
+# page <- read_html(url)
+
+# # List all div.section nodes
+# sections <- page |> html_nodes("div.section")
+# length(sections) # see how many there are
+
+# # Extract text from each section
+# texts <- sections |> html_text(trim = TRUE)
+
+# # CHeck which section it is
+# texts[[1]]
+# texts[[2]]
+# texts[[3]]
+# texts[[4]]
+```
+
+```{r} Extract texts
+scrape_statement_text <- function(url) {
+  tryCatch({
+    page <- read_html(url)
+    
+    # Grab both sections and appendices (in document order)
+    nodes <- page |> html_nodes("div.section, div.appendix")
+    
+    if (length(nodes) == 0) {
+      return(tibble(url_text = url, text = NA_character_))
+    }
+    
+    # Extract and clean text
+    node_texts <- nodes |>
+      map_chr(~ .x |> html_text(trim = TRUE) |> str_squish())
+    
+    # Keep only long texts (as they are the meaningful)
+    long_nodes <- node_texts[nchar(node_texts) >= 1000]
+    
+    text <- if (length(long_nodes) > 0) {
+      paste(long_nodes, collapse = "\n\n")
+    } else {
+      NA_character_
+    }
+    
+    tibble(
+      url_text = url,
+      text = text
+    )
+    
+  }, error = function(e) {
+    message("Failed at: ", url)
+    tibble(url_text = url, text = NA_character_)
+  })
+}
+
+
+all_statements_text <- all_statements_date |>
+  select(url, title, date) |>
+  mutate(
+    scraped = map(url, function(u) {
+      scrape_statement_text(u) |> rename(scraped_text = text)
+    })
+  ) |>
+  unnest(scraped) |>
+  select(-url_text)
+
+nchar(all_statements_text$scraped_text)
+```
+
+
+Separators between statement and Q&A:
+* (***)
+* We are now at your disposal
+* We are now ready to take your questions
+* Transcript of the quetions asked and the answers given
+* I am now open to questions.
+
+```{r} Splitting Statements and Q&As inside df
+split_pattern <- paste(
+  "We are now ready to take your questions",
+  "We are now at your disposal",
+  "Transcript of the questions asked and the answers given",
+  "\\*\\s*\\*\\s*\\*",
+  sep = "|"
+)
+
+split_statement_qa <- function(scraped_text) {
+  
+  if (is.na(scraped_text)) {
+    return(tibble(
+      statement = NA_character_,
+      qa = NA_character_,
+      separator_found = FALSE
+    ))
+  }
+  
+  # Locate separators
+  m <- str_locate(scraped_text, regex(split_pattern, ignore_case = TRUE))
+  
+  # Save everything in statement if no separator found
+  if (is.na(m[1])) {
+    return(tibble(
+      statement = scraped_text,
+      qa = NA_character_,
+      separator_found = FALSE
+    ))
+  }
+  
+  # Save texts split
+  tibble(
+    statement = str_trim(substr(scraped_text, 1, m[1] - 1)),
+    qa = str_trim(substr(scraped_text, m[2] + 1, nchar(scraped_text))),
+    separator_found = TRUE
+  )
+}
+
+
+all_statements_split <- all_statements_text |>
+  mutate(split = map(scraped_text, split_statement_qa)) |>
+  unnest(split) |>
+  select(-scraped_text)
+```
+
+
+```{r} Clean Text
+clean_ecb_text <- function(text) {
+  
+  text |>
+    # Normalize line breaks & whitespace
+    str_replace_all("[\r\n\t]+", " ") |>
+    str_replace_all("\\s{2,}", " ") |>
+    
+    # Remove separators and unify dashes
+    str_replace_all("\\*\\s*\\*\\s*\\*", " ") |>
+    str_replace_all("–|—", "-") |>   # normalize dashes
+    
+    # Remove non-breaking spaces
+    str_replace_all("\u00A0", " ") |>
+    
+    str_trim()
+}
+
+all_statements_split_clean <- all_statements_split |>
+  mutate(
+    statement = clean_ecb_text(statement),
+    qa = clean_ecb_text(qa)
+  )
+
+# Note for colleagues: This is debatable, but these are mostly non-policy statement press
+# conferences or extraordinary events. Open for different solution.
+# Sometimes, there's only Q&A though, which would confound the rather neutral statement column,
+# hence I delete them here.
+all_statements_split_clean <- all_statements_split_clean |>
+  filter(!is.na(qa))
+```
+
+```{r} Split data frames for qa and statements
+statements_df <- all_statements_split_clean |>
+  select(url, title, date, statement)
+
+qa_df <- all_statements_split_clean |>
+  filter(!is.na(qa)) |>
+  select(url, title, date, qa)
+```
+
+```{r} Save Data Frames
+saveRDS(statements_df, "data/statements_Jan.rds")
+saveRDS(qa_df, "data/QandAs_Jan.rds")
+```
