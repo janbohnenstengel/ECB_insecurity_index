@@ -1,0 +1,167 @@
+---
+title: First Try Towards A Dictionary Based Indicator
+author: Jan Bohnenstengel
+theme: cosmo
+format:
+    html: default
+---
+
+```{r}
+#| label: Setup
+#| echo: true
+#| output: false
+#| warning: false
+#| error: false
+
+rm(list = ls())
+
+librarian::shelf(tidyverse,
+                 data.table,
+                 purrr,
+                 stringr,
+                 httr,
+                 jsonlite,
+                 lubridate,
+                 readr,
+                 tm,
+                 Matrix,
+                 SnowballC,
+                 quanteda,
+                 tidytext,
+                 reticulate,
+                 fuzzyjoin)
+```
+
+```{r}
+#| label: Import data
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+all_text_data <- as.data.frame(readRDS("data/all_textual_data_separate.rds"))
+
+combined_text_data <- as.data.frame(readRDS("data/all_text_per_meeting_combined.rds"))
+```
+
+```{r}
+#| label: Build risk dictionary
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+risk_dictionary <- c(
+  "uncertain", "uncertainty", "risk", "risks", "volatile", "volatility",
+  "concern", "concerns", "doubt", "doubts", "instability", "fragile",
+  "turbulent", "unpredictable", "fluctuation", "fluctuations"
+)
+
+# Stemming the dictionary
+risk_dictionary_stemmed <- wordStem(risk_dictionary)
+```
+
+```{r}
+#| label: Indicator Function
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+count_uncertainty_norm <- function(text, dictionary) {
+  words <- unlist(str_split(text, "\\s+"))
+  score <- sum(words %in% dictionary)
+  return(score / length(words))  # normalized by text length
+}
+
+```
+
+```{r}
+#| label: Compute indicator for separate text types
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+# Statements
+all_text_data$statement_score <- sapply(all_text_data$statement_processed, count_uncertainty_norm,
+                                        dictionary = risk_dictionary_stemmed)
+
+# Q&As
+all_text_data$qa_score <- sapply(all_text_data$qa_processed, count_uncertainty_norm,
+                                 dictionary = risk_dictionary_stemmed)
+
+# Accounts
+all_text_data$account_score <- sapply(all_text_data$account_processed, count_uncertainty_norm,
+                                      dictionary = risk_dictionary_stemmed)
+all_text_data <- all_text_data |>
+    mutate(account_score = case_when(
+        account_score == 0 ~ NA_real_,
+        .default = account_score))
+
+# Combined texts
+combined_text_data$dictionary_score <- sapply(combined_text_data$text, count_uncertainty_norm, 
+                                              dictionary = risk_dictionary_stemmed) 
+```
+
+```{r}
+#| label:  Check and Visualize Measures
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+str(all_text_data)
+
+cor(all_text_data$statement_score, all_text_data$qa_score)
+
+# Accounts only Plot
+accounts_score_plot <- all_text_data |>
+    ggplot(aes(x = date, y = account_score)) +
+    geom_line() +
+    labs(title = "Accounts Only Uncertainty Indicator (Dictitonary Based)") +
+    scale_x_date(limits = as.Date(c("2015-01-01", "2025-12-18")),
+                 date_breaks = "1 year",
+                 date_labels = "%Y") +
+    theme_minimal()
+accounts_score_plot
+ggsave("plots/account_score_over_time.png", accounts_score_plot, height = 5, width = 8,
+       bg = "white", dpi = 320)
+
+# Statements only Plot
+statement_score_plot <- all_text_data |>
+    ggplot(aes(x = date, y = statement_score)) +
+    geom_line() +
+    labs(title = "Statements Only Uncertainty Indicator (Dictitonary Based)") +
+    scale_x_date(date_breaks = "2 year",
+                 date_labels = "%Y") +
+    theme_minimal()
+statement_score_plot
+ggsave("plots/statement_score_over_time.png", statement_score_plot, height = 5, width = 8,
+       bg = "white", dpi = 320)
+
+# Q&As only Plot
+qa_score_plot <- all_text_data |>
+    ggplot(aes(x = date, y = qa_score)) +
+    geom_line() +
+    labs(title = "Q&As Only Uncertainty Indicator (Dictitonary Based)") +
+    scale_x_date(date_breaks = "2 year",
+                 date_labels = "%Y") +
+    theme_minimal()
+qa_score_plot
+ggsave("plots/qa_score_over_time.png", qa_score_plot, height = 5, width = 8,
+       bg = "white", dpi = 320)
+
+# All texts combined plot
+pasted_score_plot <- combined_text_data |>
+    ggplot(aes(x = date, y = dictionary_score)) +
+    geom_line() +
+    labs(title = "Combined Uncertainty Indicator (Dictitonary Based)") +
+    scale_x_date(date_breaks = "2 year",
+                 date_labels = "%Y") +
+    theme_minimal()
+pasted_score_plot
+ggsave("plots/pasted_score_over_time.png", pasted_score_plot, height = 5, width = 8,
+       bg = "white", dpi = 320)
+```
+

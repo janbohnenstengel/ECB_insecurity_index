@@ -1,23 +1,21 @@
 # Literature
 /library/*
 
+!/library/Group3_library.bib
+!/library/Projct_Literature.docx
+
 # Data
-/data
+/data/*
+!/data/raw_ECB_policy_accounts.rds
+!/data/raw_QandAs_Jan.rds
+!/data/raw_statements_Jan.rds
 
-# R and RStudio
-.Rhistory
-.RData
-.Ruserdata
-.Rproj.user/
-.Rproj
-
-# Quarto / outputs
-_site/
-public/
+# Output
 *.html
 
-# VS Code
-.vscode/
-
-# Misc
-.DS_Store
+# Quarto
+/Jan_first_dictionary_index_files
+/Jan_prepare_textual_data_for_index_files
+*/bootstrap/*
+*/clipboard/*
+*/quarto-html/*

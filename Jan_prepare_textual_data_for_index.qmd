@@ -1,0 +1,157 @@
+---
+title: Preparing data for Index
+author: Jan Bohnenstengel
+theme: cosmo
+format:
+    html: default
+---
+
+# Setup
+```{r}
+#| label: Setup
+#| echo: true
+#| output: false
+#| warning: false
+#| error: false
+
+rm(list = ls())
+
+librarian::shelf(tidyverse,
+                 data.table,
+                 purrr,
+                 stringr,
+                 httr,
+                 jsonlite,
+                 lubridate,
+                 readr,
+                 tm,
+                 Matrix,
+                 SnowballC,
+                 quanteda,
+                 tidytext,
+                 reticulate,
+                 fuzzyjoin)
+```
+
+# Load data
+```{r}
+#| label: Load data
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+statements <- readRDS("data/raw_statements_Jan.rds")
+statements <- statements[, c("date", "title", "url", "statement")]
+
+QandAs <- readRDS("data/raw_QandAs_Jan.rds")
+QandAs <- QandAs[, c("date", "title", "url", "qa")]
+
+accounts <- readRDS("data/raw_ECB_policy_accounts.rds")
+accounts <- accounts[, c("date", "title", "url", "scraped_text")]
+```
+
+# Preprocessing data
+```{r}
+#| label: Preprocessing data
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+preprocess_text <- function(text) {
+  text <- tolower(text)                  # lowercase
+  text <- removePunctuation(text)        # remove punctuation
+  text <- removeWords(text, stopwords("en"))  # remove English stopwords
+  words <- unlist(str_split(text, "\\s+"))            # split into words
+  words <- words[!words %in% stopwords("en")]         # remove stopwords
+  words <- wordStem(words)                             # stem words
+  text <- paste(words, collapse = " ")
+}
+
+# accounts <- accounts |>
+#     mutate(account_processed = preprocess_text(scraped_text))
+accounts$account_processed <- sapply(accounts$scraped_text, preprocess_text)
+
+# QandAs <- QandAs |>
+#     mutate(qa_processed = preprocess_text(qa))
+QandAs$qa_processed <- sapply(QandAs$qa, preprocess_text)
+
+# statements <- statements |>
+#     mutate(statement_processed = preprocess_text(statement))
+statements$statement_processed <- sapply(statements$statement, preprocess_text)
+```
+
+```{r}
+#| label: Check text
+#| include: false
+
+cat(as.character(accounts[1, 5]))
+names(accounts)
+```
+
+# Merge Texts
+```{r}
+#| label: Merging Texts
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+### Merge Statements and Q&As
+all_text_data <- left_join(statements[, c("date", "title", "statement_processed")],
+                           QandAs[, c("date", "title", "qa_processed")], by = c("date", "title"))
+
+### Merge Accounts (rolling merge with data.table)
+# convert to data.table
+setDT(all_text_data)
+setDT(accounts)
+
+# ensure Date class
+all_text_data[, date := as.Date(date)]
+accounts[, date := as.Date(date)]
+
+# sort (required for rolling join)
+setkey(all_text_data, date)
+setkey(accounts, date)
+
+# Assign meeting dates to accounts
+accounts_matched <- accounts[all_text_data, 
+                             on = .(date), 
+                             roll = Inf,
+                             .(account_date = i.date,
+                               account_processed = account_processed,
+                               account_release_date = date)]
+
+# Match data
+all_text_data[
+  accounts_matched,
+  on = .(date = account_date),
+  account_processed := i.account_processed
+]
+
+cat(as.character(all_text_data[269, 5]))
+# Seems to have worked
+
+# Add column that combines all 3 texts
+combined_texts <- all_text_data[, "date"]
+combined_texts$text <- paste(all_text_data$statement_processed, 
+                             all_text_data$qa_processed, 
+                             all_text_data$account_processed, 
+                             sep = " ")
+
+names(all_text_data)
+names(combined_texts)
+```
+
+# Save Data
+```{r}
+#| label: Save data
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+saveRDS(all_text_data, "data/all_textual_data_separate.rds")
+saveRDS(combined_texts, "data/all_text_per_meeting_combined.rds")
+```
