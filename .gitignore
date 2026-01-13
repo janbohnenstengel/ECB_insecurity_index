@@ -1,8 +1,3 @@
-# Literature
-/library/*
-
-!/library/Group3_library.bib
-!/library/Projct_Literature.docx
 
 # Data
 /data/*
@@ -14,8 +9,11 @@
 *.html
 
 # Quarto
+/scraping/Jan_scraping_accounts_files
+/scraping/Jan_scraping_statements_QAs_files
 /Jan_first_dictionary_index_files
 /Jan_prepare_textual_data_for_index_files
+/indicators/Jan_first_dictionary_index_files
 */bootstrap/*
 */clipboard/*
 */quarto-html/*

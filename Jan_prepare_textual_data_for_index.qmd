@@ -42,13 +42,17 @@ librarian::shelf(tidyverse,
 #| error: false
 
 statements <- readRDS("data/raw_statements_Jan.rds")
-statements <- statements[, c("date", "title", "url", "statement")]
+statements <- statements[, c("date", "title", "url", "statement")] |>
+                rename(raw_statement = statement)
 
 QandAs <- readRDS("data/raw_QandAs_Jan.rds")
-QandAs <- QandAs[, c("date", "title", "url", "qa")]
+QandAs <- QandAs[, c("date", "title", "url", "qa")] |>
+                rename(raw_qa = qa)
 
 accounts <- readRDS("data/raw_ECB_policy_accounts.rds")
-accounts <- accounts[, c("date", "title", "url", "scraped_text")]
+accounts <- accounts[, c("date", "title", "url", "scraped_text")] |>
+                rename(raw_account = scraped_text,
+                       release_date = date)
 ```
 
 # Preprocessing data
@@ -62,7 +66,6 @@ accounts <- accounts[, c("date", "title", "url", "scraped_text")]
 preprocess_text <- function(text) {
   text <- tolower(text)                  # lowercase
   text <- removePunctuation(text)        # remove punctuation
-  text <- removeWords(text, stopwords("en"))  # remove English stopwords
   words <- unlist(str_split(text, "\\s+"))            # split into words
   words <- words[!words %in% stopwords("en")]         # remove stopwords
   words <- wordStem(words)                             # stem words
@@ -71,15 +74,15 @@ preprocess_text <- function(text) {
 
 # accounts <- accounts |>
 #     mutate(account_processed = preprocess_text(scraped_text))
-accounts$account_processed <- sapply(accounts$scraped_text, preprocess_text)
+accounts$account_processed <- sapply(accounts$raw_account, preprocess_text)
 
 # QandAs <- QandAs |>
 #     mutate(qa_processed = preprocess_text(qa))
-QandAs$qa_processed <- sapply(QandAs$qa, preprocess_text)
+QandAs$qa_processed <- sapply(QandAs$raw_qa, preprocess_text)
 
 # statements <- statements |>
 #     mutate(statement_processed = preprocess_text(statement))
-statements$statement_processed <- sapply(statements$statement, preprocess_text)
+statements$statement_processed <- sapply(statements$raw_statement, preprocess_text)
 ```
 
 ```{r}
@@ -99,50 +102,105 @@ names(accounts)
 #| error: false
 
 ### Merge Statements and Q&As
-all_text_data <- left_join(statements[, c("date", "title", "statement_processed")],
-                           QandAs[, c("date", "title", "qa_processed")], by = c("date", "title"))
+all_text_data <- left_join(statements[, c("date", "title", "raw_statement", "statement_processed")],
+                           QandAs[, c("date", "title", "raw_qa", "qa_processed")],
+                           by = c("date", "title"))
 
-### Merge Accounts (rolling merge with data.table)
-# convert to data.table
-setDT(all_text_data)
-setDT(accounts)
+### Merge all_text_data with accounts (fuzzyjoin as accounts always ~4 weeks after meetings)
+first_account_date <- min(accounts$release_date - 33 )
 
-# ensure Date class
-all_text_data[, date := as.Date(date)]
-accounts[, date := as.Date(date)]
+separate_texts <- fuzzy_left_join(
+  all_text_data,
+  accounts,
+  by = c("date" = "release_date"),
+  match_fun = list(`<=`)) |>   # release_date >= date (meeting occurs before release)
+  group_by(date) |>       # group by meeting
+  slice_min(release_date) |>  # take the earliest release after the meeting
+  ungroup()
 
-# sort (required for rolling join)
-setkey(all_text_data, date)
-setkey(accounts, date)
+separate_texts <- separate_texts |>
+  mutate(
+    release_date = if_else(date < first_account_date, as.Date(NA), release_date),
+    raw_account = if_else(date < first_account_date, NA_character_, raw_account),
+    account_processed = if_else(date < first_account_date, NA_character_, account_processed))
 
-# Assign meeting dates to accounts
-accounts_matched <- accounts[all_text_data, 
-                             on = .(date), 
-                             roll = Inf,
-                             .(account_date = i.date,
-                               account_processed = account_processed,
-                               account_release_date = date)]
+names(separate_texts)
+separate_texts <- separate_texts |>
+  select(-c(title.x, title.y)) |>
+  relocate(release_date, .after = date)
 
-# Match data
-all_text_data[
-  accounts_matched,
-  on = .(date = account_date),
-  account_processed := i.account_processed
-]
-
-cat(as.character(all_text_data[269, 5]))
-# Seems to have worked
-
-# Add column that combines all 3 texts
-combined_texts <- all_text_data[, "date"]
-combined_texts$text <- paste(all_text_data$statement_processed, 
-                             all_text_data$qa_processed, 
-                             all_text_data$account_processed, 
-                             sep = " ")
-
-names(all_text_data)
-names(combined_texts)
+### Add Create data that combines all 3 texts
+combined_texts <- separate_texts[, "date"]
+combined_texts$processed_text <- paste(separate_texts$statement_processed, 
+                                       separate_texts$qa_processed, 
+                                       separate_texts$account_processed, 
+                                      sep = " ")
+combined_texts$raw_text <- paste(separate_texts$raw_statement, 
+                                 separate_texts$raw_qa, 
+                                 separate_texts$raw_account, 
+                                 sep = " ")
 ```
+
+# Check Merged Data
+```{r}
+#| label: Checked Merged Data
+#| echo: true
+#| output: true
+#| warning: false
+#| error: false
+
+names(separate_texts)
+names(combined_texts)
+
+# Should be 10 March 2022
+substr(separate_texts[252, 3], 1, 350)
+substr(separate_texts[252, 8], 1, 350)
+
+
+# Should be 3 Feb 2022
+substr(separate_texts[251, 3], 1, 350)
+substr(separate_texts[251, 8], 1, 350)
+
+# All good until June 2025
+substr(separate_texts[279, 3], 1, 120)
+substr(separate_texts[279, 8], 1, 200)
+
+# First Problem in July 2025 (row 280)
+check_duplicate_accs <- accounts[complete.cases(accounts$release_date), 1]
+check_duplicate_accs[duplicated(check_duplicate_accs$release_date), ]
+
+check_duplicate_statements <- all_text_data[complete.cases(all_text_data$date), 1]
+check_duplicate_statements[duplicated(check_duplicate_statements$date), ]
+
+### Problematic cases
+
+# 2002-01-03
+substr(separate_texts$raw_statement[separate_texts$date == as.Date("2002-01-03")], 1, 500)
+substr(separate_texts$raw_account[separate_texts$date == as.Date("2002-01-03")], 1, 300)
+
+# 2020-04-09
+substr(separate_texts$raw_statement[!is.na(separate_texts$release_date) &
+                                    separate_texts$release_date == as.Date("2020-04-09")],
+                                    1, 200)
+substr(separate_texts$raw_account[!is.na(separate_texts$release_date) &
+                                  separate_texts$release_date == as.Date("2020-04-09")],
+                                  1, 200)
+
+# 2025-08-28
+substr(separate_texts$raw_statement[!is.na(separate_texts$release_date) &
+                                    separate_texts$release_date == as.Date("2025-08-28")],
+                                    1, 200)
+substr(separate_texts$raw_account[!is.na(separate_texts$release_date) &
+                                  separate_texts$release_date == as.Date("2025-08-28")],
+                                  1, 300)
+
+```
+
+We have 3 problematic duplicates:
+* 2 statements on 2002-01-03 (not a problem when merging)
+* 2 accounts on 2020-04-09 -> extra account of telco meeting that has no statement
+* 2 accounts on 2025-08-28 -> extra account of video conference meeting that has no statement
+The latter 2 are a problem as they are matched to a meeting that is already matched to its true account!
 
 # Save Data
 ```{r}

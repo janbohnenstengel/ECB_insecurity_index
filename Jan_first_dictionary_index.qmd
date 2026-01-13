@@ -29,7 +29,8 @@ librarian::shelf(tidyverse,
                  quanteda,
                  tidytext,
                  reticulate,
-                 fuzzyjoin)
+                 fuzzyjoin,
+                 here)
 ```
 
 ```{r}
@@ -39,9 +40,12 @@ librarian::shelf(tidyverse,
 #| warning: false
 #| error: false
 
-all_text_data <- as.data.frame(readRDS("data/all_textual_data_separate.rds"))
+getwd()
+list.files()
 
-combined_text_data <- as.data.frame(readRDS("data/all_text_per_meeting_combined.rds"))
+all_text_separate <- readRDS(here::here("data", "all_texts_per_meeting_separate.rds"))
+
+combined_text_data <- readRDS(here::here("data", "all_text_per_meeting_combined.rds"))
 ```
 
 ```{r}
@@ -84,23 +88,23 @@ count_uncertainty_norm <- function(text, dictionary) {
 #| error: false
 
 # Statements
-all_text_data$statement_score <- sapply(all_text_data$statement_processed, count_uncertainty_norm,
+all_text_separate$statement_score <- sapply(all_text_separate$statement_processed, count_uncertainty_norm,
                                         dictionary = risk_dictionary_stemmed)
 
 # Q&As
-all_text_data$qa_score <- sapply(all_text_data$qa_processed, count_uncertainty_norm,
+all_text_separate$qa_score <- sapply(all_text_separate$qa_processed, count_uncertainty_norm,
                                  dictionary = risk_dictionary_stemmed)
 
 # Accounts
-all_text_data$account_score <- sapply(all_text_data$account_processed, count_uncertainty_norm,
+all_text_separate$account_score <- sapply(all_text_separate$account_processed, count_uncertainty_norm,
                                       dictionary = risk_dictionary_stemmed)
-all_text_data <- all_text_data |>
+all_text_separate <- all_text_separate |>
     mutate(account_score = case_when(
         account_score == 0 ~ NA_real_,
         .default = account_score))
 
 # Combined texts
-combined_text_data$dictionary_score <- sapply(combined_text_data$text, count_uncertainty_norm, 
+combined_text_data$dictionary_score <- sapply(combined_text_data$processed_text, count_uncertainty_norm, 
                                               dictionary = risk_dictionary_stemmed) 
 ```
 
@@ -111,12 +115,12 @@ combined_text_data$dictionary_score <- sapply(combined_text_data$text, count_unc
 #| warning: false
 #| error: false
 
-str(all_text_data)
+str(all_text_separate)
 
-cor(all_text_data$statement_score, all_text_data$qa_score)
+cor(all_text_separate$statement_score, all_text_separate$qa_score)
 
 # Accounts only Plot
-accounts_score_plot <- all_text_data |>
+accounts_score_plot <- all_text_separate |>
     ggplot(aes(x = date, y = account_score)) +
     geom_line() +
     labs(title = "Accounts Only Uncertainty Indicator (Dictitonary Based)") +
@@ -125,11 +129,11 @@ accounts_score_plot <- all_text_data |>
                  date_labels = "%Y") +
     theme_minimal()
 accounts_score_plot
-ggsave("plots/account_score_over_time.png", accounts_score_plot, height = 5, width = 8,
-       bg = "white", dpi = 320)
+ggsave(filename = here::here("plots", "account_score_over_time.png"), accounts_score_plot,
+       height = 5, width = 8, bg = "white", dpi = 320)
 
 # Statements only Plot
-statement_score_plot <- all_text_data |>
+statement_score_plot <- all_text_separate |>
     ggplot(aes(x = date, y = statement_score)) +
     geom_line() +
     labs(title = "Statements Only Uncertainty Indicator (Dictitonary Based)") +
@@ -137,11 +141,11 @@ statement_score_plot <- all_text_data |>
                  date_labels = "%Y") +
     theme_minimal()
 statement_score_plot
-ggsave("plots/statement_score_over_time.png", statement_score_plot, height = 5, width = 8,
-       bg = "white", dpi = 320)
+ggsave(filename = here::here("plots", "statement_score_over_time.png"), statement_score_plot,
+       height = 5, width = 8, bg = "white", dpi = 320)
 
 # Q&As only Plot
-qa_score_plot <- all_text_data |>
+qa_score_plot <- all_text_separate |>
     ggplot(aes(x = date, y = qa_score)) +
     geom_line() +
     labs(title = "Q&As Only Uncertainty Indicator (Dictitonary Based)") +
@@ -149,8 +153,8 @@ qa_score_plot <- all_text_data |>
                  date_labels = "%Y") +
     theme_minimal()
 qa_score_plot
-ggsave("plots/qa_score_over_time.png", qa_score_plot, height = 5, width = 8,
-       bg = "white", dpi = 320)
+ggsave(filename = here::here("plots", "qa_score_over_time.png"), qa_score_plot, height = 5,
+       width = 8, bg = "white", dpi = 320)
 
 # All texts combined plot
 pasted_score_plot <- combined_text_data |>
@@ -161,7 +165,14 @@ pasted_score_plot <- combined_text_data |>
                  date_labels = "%Y") +
     theme_minimal()
 pasted_score_plot
-ggsave("plots/pasted_score_over_time.png", pasted_score_plot, height = 5, width = 8,
-       bg = "white", dpi = 320)
+ggsave(filename = here::here("plots", "pasted_score_over_time.png"), pasted_score_plot, height = 5,
+       width = 8, bg = "white", dpi = 320)
 ```
 
+```{r}
+#Statement
+cat(as.character(all_text_separate[251, 3]))
+
+# Q&A
+cat(as.character(all_text_separate[251, 4]))
+```
